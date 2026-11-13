@@ -135,6 +135,26 @@ BadgedBox(badge = { if (state.pendingExits.isNotEmpty()) Badge() }) {
 }
 ```
 
+Tap an exit for its details sheet:
+- Android's description and the exit status (an exit code, or the signal, such as `Signal 9 (SIGKILL)`).
+- The memory sampled at exit, and the process name and PID.
+- For ANRs on Android 17 and later, the ANR type, the timeout that was hit, and whether the user could see the hang.
+- The log session the process was running, with a button to open its logs while the viewer still keeps them, and the app's note.
+
+Data that is better read on a computer is shared rather than shown:
+- **Share trace** appears when Android kept a trace. It sends an ANR's thread dump as `anr-<time>.txt`, or a native crash tombstone (Android 12+) as `tombstone-<time>.pb`. The tombstone is a protobuf following AOSP's [`tombstone.proto`](https://android.googlesource.com/platform/system/core/+/refs/heads/main/debuggerd/proto/tombstone.proto). Read it with AOSP's `pbtombstone`, or with `protoc --decode=Tombstone tombstone.proto < tombstone.pb`. Android keeps traces in a shared buffer, so an older one may already be gone.
+- **Share details** sends every field as `exit-<time>.txt`, with an ANR dump appended.
+
+Both use the same share chooser and app-private export folder as Share for logs.
+`processExits.openTrace(exit)` gives host apps the same trace stream.
+
+To link exits to log sessions, `install()` tags the process through
+`ActivityManager.setProcessStateSummary` with the capture's session ID. Add a short note with
+`capture.setExitNote("model: Voz")`; it is redacted and cut to fit Android's 128-byte limit. Android
+throttles these writes, so set the note when the state changes, and keep personal data out of it.
+Android keeps one summary per process, so an app that writes its own turns the link off with
+`.linkExitsToSessions(false)`; its bytes then show in the sheet as they are.
+
 Call `refresh()` to read the history again. An app that brings its own `LogSource` builds a
 history with `ProcessExitHistory.Builder(context)` and passes it to
 `LogViewer(source, onBack, processExits = history)`.

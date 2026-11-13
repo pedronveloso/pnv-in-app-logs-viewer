@@ -156,10 +156,7 @@ class ProcessExitHistoryTest {
       ProcessExit(0, 1, ExitReason.MemoryLimit, 17, "[KILL PID] kill", 100, 1_480_000, 0, "app")
     val message = exit.statusMessage(isProblem = true)
     assertThat(message.title).startsWith("Memory limit • ")
-    assertThat(message.detail)
-      .isEqualTo(
-        "${ExitReason.MemoryLimit.explanation} It was on screen.\n" +
-          "System: [KILL PID] kill • PSS 1.52 GB",
-      )
+    // The card stays short; the description and memory live in the details sheet.
+    assertThat(message.detail).isEqualTo("${ExitReason.MemoryLimit.explanation} It was on screen.")
   }
 }

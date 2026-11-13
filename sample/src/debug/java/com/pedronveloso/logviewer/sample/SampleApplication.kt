@@ -15,6 +15,8 @@ class SampleApplication : Application() {
         .build()
     Timber.plant(Timber.DebugTree())
     capture.install()
+    // Kept with this process's exit record, so a later crash says what the sample was doing.
+    capture.setExitNote("sample: idle")
     Timber.i("Sample started. Open Logs to inspect this session.")
   }
 

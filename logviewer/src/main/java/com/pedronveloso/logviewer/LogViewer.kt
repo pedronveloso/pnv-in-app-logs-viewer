@@ -77,6 +77,7 @@ import androidx.compose.ui.tooling.preview.PreviewLightDark
 import androidx.compose.ui.unit.dp
 import androidx.core.content.FileProvider
 import java.io.File
+import java.io.OutputStream
 import kotlin.time.Duration.Companion.milliseconds
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
@@ -131,6 +132,10 @@ public fun LogViewer(
   var follow by rememberSaveable(source) { mutableStateOf(true) }
   var refresh by remember { mutableIntStateOf(0) }
   var error by remember { mutableStateOf<String?>(null) }
+  // A key rather than the exit, so the open sheet survives rotation without serializing it.
+  var selectedExitKey by rememberSaveable(processExits) { mutableStateOf<String?>(null) }
+  val selectedExit =
+    (exitState as? ProcessExitState.Loaded)?.exits?.firstOrNull { it.key == selectedExitKey }
   // Save selection identifiers rather than serializing log entries or traces.
   var selectedEntryKey by
     rememberSaveable(
@@ -269,6 +274,7 @@ public fun LogViewer(
             Modifier.fillMaxSize(),
             exitState = exitState,
             onDismissExits = { processExits?.let { scope.launch { it.acknowledge() } } },
+            onSelectExit = { selectedExitKey = it.key },
           )
         } else {
           val onSelectSession: (LogSession) -> Unit = {
@@ -360,6 +366,35 @@ public fun LogViewer(
             }
           }
         }
+      }
+    }
+    if (tab == 1 && processExits != null) {
+      selectedExit?.let { exit ->
+        ExitDetailsSheet(
+          exit = exit,
+          sessionKept = sessions.any { it.id == exit.sessionId },
+          onOpenSession = {
+            selectedExitKey = null
+            selectedEntryKey = null
+            if (selectedSession != exit.sessionId) allEntries = emptyList()
+            selectedSession = exit.sessionId
+            follow = false
+            tab = 0
+          },
+          onShareTrace = {
+            scope.launch {
+              runCatching { shareExitTrace(context, processExits, exit) }
+                .onFailure { error = it.message ?: "Could not share the trace" }
+            }
+          },
+          onShareDetails = {
+            scope.launch {
+              runCatching { shareExitDetails(context, processExits, exit) }
+                .onFailure { error = it.message ?: "Could not share the details" }
+            }
+          },
+          onDismiss = { selectedExitKey = null },
+        )
       }
     }
     if (!expanded && tab == 0) {
@@ -814,20 +849,93 @@ private fun NoMatchingEntriesPreview() {
 }
 
 internal fun shareLogs(context: Context, text: String) {
+  val file =
+    exportFile(context, "logs-${System.currentTimeMillis()}.txt") { it.write(text.toByteArray()) }
+  launchShare(context, file, "text/plain", "logs", "Share logs")
+}
+
+/**
+ * Writes an export into the FileProvider's cache folder, dropping exports older than a day. The
+ * same folder serves logs, exit traces and exit details.
+ */
+internal fun exportFile(context: Context, name: String, write: (OutputStream) -> Unit): File {
   val directory = File(context.cacheDir, "pnv-logviewer-exports")
   check(directory.isDirectory || directory.mkdirs()) { "Could not prepare export" }
   val cutoff = System.currentTimeMillis() - 24 * 60 * 60 * 1000L
   directory.listFiles()?.filter { it.lastModified() < cutoff }?.forEach(File::delete)
-  val file = File(directory, "logs-${System.currentTimeMillis()}.txt")
-  file.writeText(text)
+  return File(directory, name).apply { outputStream().use(write) }
+}
+
+internal fun launchShare(
+  context: Context,
+  file: File,
+  mimeType: String,
+  label: String,
+  chooserTitle: String,
+) {
   val uri =
     FileProvider.getUriForFile(context, "${context.packageName}.pnvlogviewer.fileprovider", file)
   val intent =
     Intent(Intent.ACTION_SEND).apply {
-      type = "text/plain"
+      type = mimeType
       putExtra(Intent.EXTRA_STREAM, uri)
       addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-      clipData = ClipData.newRawUri("logs", uri)
+      clipData = ClipData.newRawUri(label, uri)
     }
-  context.startActivity(Intent.createChooser(intent, "Share logs"))
+  context.startActivity(Intent.createChooser(intent, chooserTitle))
 }
+
+/** A tombstone is binary protobuf, so it goes out as a file to read on a computer. */
+internal suspend fun shareExitTrace(
+  context: Context,
+  history: ProcessExitHistory,
+  exit: ProcessExit,
+) {
+  val tombstone = exit.traceKind == TraceKind.Tombstone
+  val file =
+    withContext(Dispatchers.IO) {
+      val trace = checkNotNull(history.openTrace(exit)) { "Android no longer keeps this trace" }
+      trace.use { input ->
+        exportFile(
+          context,
+          exit.exportFileName(
+            if (tombstone) "tombstone" else "anr",
+            if (tombstone) "pb" else "txt",
+          ),
+        ) {
+          input.copyTo(it)
+        }
+      }
+    }
+  launchShare(
+    context,
+    file,
+    if (tombstone) "application/octet-stream" else "text/plain",
+    "trace",
+    "Share trace",
+  )
+}
+
+internal suspend fun shareExitDetails(
+  context: Context,
+  history: ProcessExitHistory,
+  exit: ProcessExit,
+) {
+  val file =
+    withContext(Dispatchers.IO) {
+      // An ANR dump is text and reads well after the fields; a tombstone stays a separate file.
+      val trace =
+        if (exit.traceKind == TraceKind.AnrDump) {
+          history.openTrace(exit)?.use { it.readBytes().decodeToString() }
+        } else {
+          null
+        }
+      exportFile(context, exit.exportFileName("exit", "txt")) {
+        it.write(exit.detailsText(trace).toByteArray())
+      }
+    }
+  launchShare(context, file, "text/plain", "exit", "Share exit details")
+}
+
+private val ProcessExit.key: String
+  get() = "$timestampMillis:$pid"

@@ -61,11 +61,46 @@ internal constructor(
     { appContext, id -> DiskJournal(appContext, id) },
   ) {
     processExits = ProcessExitHistory.Builder(context).redact(redact).build()
+    linkExitsToSessions = true
   }
 
   /** The app's exit history, shown on the Status tab; null when [Builder.processExits] is off. */
   public var processExits: ProcessExitHistory? = null
     private set
+
+  // Off for the internal constructor, so tests opt in; the builder and public constructor turn it
+  // on.
+  internal var linkExitsToSessions = false
+  internal var summaryWriter: (Context, ByteArray) -> Unit = ::writeStateSummary
+  private var exitNote: String? = null
+
+  /**
+   * A short note Android keeps with this process's exit record, such as the feature in use, so a
+   * later crash or memory-limit kill says what the app was doing. It is redacted, cut to fit
+   * Android's 128-byte limit next to the session ID, and needs [Builder.linkExitsToSessions].
+   * Android throttles these writes, so set it when the state changes, not on every frame. Keep
+   * personal data out of it.
+   */
+  public fun setExitNote(note: String?) {
+    val planted =
+      synchronized(lock) {
+        exitNote = note?.let(::safeRedact)
+        this.planted
+      }
+    if (planted) writeExitTag()
+  }
+
+  private fun safeRedact(value: String): String = runCatching {
+    redact?.invoke(value) ?: value
+  }
+    .getOrDefault("<redaction failed>")
+
+  private fun writeExitTag() {
+    if (!linkExitsToSessions) return
+    val note = synchronized(lock) { exitNote }
+    // A nicety: a throttled or unsupported write must not read as a capture failure on Status.
+    runCatching { summaryWriter(appContext, encodeStateSummary(sessionId, note)) }
+  }
 
   /**
    * Configures a capture. Every option has a default, so `Builder(context).build()` is a valid,
@@ -79,6 +114,7 @@ internal constructor(
     private var clock: () -> Long = System::currentTimeMillis
     private var processExitsEnabled = true
     private var configureProcessExits: ProcessExitHistory.Builder.() -> Unit = {}
+    private var linkExitsToSessions = true
 
     /** How many entries the current session keeps in memory. */
     public fun capacity(capacity: Int): Builder = apply {
@@ -112,6 +148,16 @@ internal constructor(
       configureProcessExits = configure
     }
 
+    /**
+     * Tags the process with this capture's session ID through `setProcessStateSummary`, so an exit
+     * opens the logs of the session that died. On by default. Turn it off if the app writes its own
+     * process state summary, which Android keeps only one of; the Status tab then shows those bytes
+     * as they are.
+     */
+    public fun linkExitsToSessions(enabled: Boolean = true): Builder = apply {
+      linkExitsToSessions = enabled
+    }
+
     public fun build(): TimberLogCapture =
       TimberLogCapture(
           context,
@@ -131,6 +177,7 @@ internal constructor(
                 .redact(redact)
                 .apply(configureProcessExits)
                 .build()
+            capture.linkExitsToSessions = linkExitsToSessions
           }
         }
   }
@@ -179,14 +226,17 @@ internal constructor(
   }
 
   /** Plant only this tree; unrelated Timber trees remain the host app's responsibility. */
-  public fun install(): Unit =
-    synchronized(lock) {
-      if (!planted) {
+  public fun install() {
+    val newlyPlanted =
+      synchronized(lock) {
+        if (planted) return@synchronized false
         Timber.plant(tree)
         planted = true
         mutableHealth.value = mutableHealth.value.copy(installed = true)
+        true
       }
-    }
+    if (newlyPlanted) writeExitTag()
+  }
 
   public fun uninstall(): Unit =
     synchronized(lock) {
