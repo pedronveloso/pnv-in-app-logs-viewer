@@ -10,7 +10,7 @@ plugins {
 
 group = "io.github.pedronveloso"
 
-version = "0.10.0"
+version = "0.11.0"
 
 kotlin { explicitApi() }
 

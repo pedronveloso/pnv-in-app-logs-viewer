@@ -17,6 +17,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
@@ -30,6 +31,7 @@ import androidx.compose.material.icons.filled.DeleteSweep
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Share
 import androidx.compose.material.icons.filled.VerticalAlignBottom
+import androidx.compose.material.icons.outlined.WarningAmber
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -54,6 +56,7 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.listSaver
@@ -87,11 +90,25 @@ private val FullLevelNamesMinWidth = 600.dp
 private const val LOG_LIST_PANE_WEIGHT = 0.56f
 private const val LOG_DETAILS_PANE_WEIGHT = 0.44f
 
-/** Host-themed, navigation-agnostic log viewer. Pass one source per installation. */
+/**
+ * Host-themed, navigation-agnostic log viewer. Pass one source per installation. [processExits]
+ * fills the Status tab's exit section; a library capture brings its own, and an app-provided source
+ * can pass one built with [ProcessExitHistory.Builder].
+ */
 @OptIn(ExperimentalMaterial3Api::class, FlowPreview::class)
 @Composable
-public fun LogViewer(source: LogSource, onBack: () -> Unit, modifier: Modifier = Modifier) {
+public fun LogViewer(
+  source: LogSource,
+  onBack: () -> Unit,
+  modifier: Modifier = Modifier,
+  processExits: ProcessExitHistory? = (source as? TimberLogCapture)?.processExits,
+) {
   val capabilities by source.capabilities.collectAsState()
+  val exitState by
+    produceState<ProcessExitState?>(null, processExits) {
+      processExits?.state?.collect { value = it }
+    }
+  val pendingExits = exitState?.pendingExits.orEmpty()
   val liveUpdates = capabilities.hasLiveUpdates && source.changes != null
   val effectiveCapabilities = capabilities.copy(hasLiveUpdates = liveUpdates)
   val health by source.health.collectAsState()
@@ -230,16 +247,29 @@ public fun LogViewer(source: LogSource, onBack: () -> Unit, modifier: Modifier =
           },
           selectedTab = if (expanded) tab else null,
           onSelectTab = { tab = it },
+          pendingExits = pendingExits.size,
         )
       },
     ) { padding ->
       Column(Modifier.fillMaxSize().padding(padding)) {
-        if (!expanded) LogViewerTabs(selectedTab = tab, onSelectTab = { tab = it })
+        if (!expanded) {
+          LogViewerTabs(
+            selectedTab = tab,
+            onSelectTab = { tab = it },
+            pendingExits = pendingExits.size,
+          )
+        }
         error?.let {
           Text(it, color = MaterialTheme.colorScheme.error, modifier = Modifier.padding(12.dp))
         }
         if (tab == 1) {
-          StatusContent(effectiveCapabilities, health, Modifier.fillMaxSize())
+          StatusContent(
+            effectiveCapabilities,
+            health,
+            Modifier.fillMaxSize(),
+            exitState = exitState,
+            onDismissExits = { processExits?.let { scope.launch { it.acknowledge() } } },
+          )
         } else {
           val onSelectSession: (LogSession) -> Unit = {
             if (selectedSession != it.id) {
@@ -401,6 +431,7 @@ private fun LogViewerTopBar(
   onClear: () -> Unit,
   selectedTab: Int? = null,
   onSelectTab: (Int) -> Unit = {},
+  pendingExits: Int = 0,
 ) {
   TopAppBar(
     title = {
@@ -411,6 +442,7 @@ private fun LogViewerTopBar(
             selectedTab,
             onSelectTab,
             Modifier.padding(start = 24.dp).width(240.dp),
+            pendingExits = pendingExits,
           )
         }
       }
@@ -459,6 +491,7 @@ private fun LogViewerTabs(
   selectedTab: Int,
   onSelectTab: (Int) -> Unit,
   modifier: Modifier = Modifier,
+  pendingExits: Int = 0,
 ) {
   PrimaryTabRow(selectedTabIndex = selectedTab, modifier = modifier) {
     Tab(
@@ -470,9 +503,28 @@ private fun LogViewerTabs(
     Tab(
       selected = selectedTab == 1,
       onClick = { onSelectTab(1) },
-      text = { Text("Status") },
+      text = {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+          if (pendingExits > 0) {
+            Icon(
+              Icons.Outlined.WarningAmber,
+              contentDescription = null,
+              tint = problemColor(),
+              modifier = Modifier.padding(end = 6.dp).size(18.dp).testTag("status_tab_warning"),
+            )
+          }
+          Text("Status")
+        }
+      },
       modifier =
-        Modifier.testTag("status_tab").semantics { contentDescription = "Show capture status" },
+        Modifier.testTag("status_tab").semantics {
+          contentDescription =
+            if (pendingExits > 0) {
+              "Show capture status, $pendingExits ${if (pendingExits == 1) "exit" else "exits"} to review"
+            } else {
+              "Show capture status"
+            }
+        },
     )
   }
 }

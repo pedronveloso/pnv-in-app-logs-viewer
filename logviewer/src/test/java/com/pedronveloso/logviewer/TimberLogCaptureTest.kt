@@ -1,3 +1,7 @@
+@file:Suppress(
+  "DEPRECATION",
+) // Also covers the deprecated constructor, which existing apps still call.
+
 package com.pedronveloso.logviewer
 
 import android.content.Context
