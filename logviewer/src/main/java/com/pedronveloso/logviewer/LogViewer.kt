@@ -17,6 +17,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
@@ -30,6 +31,7 @@ import androidx.compose.material.icons.filled.DeleteSweep
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Share
 import androidx.compose.material.icons.filled.VerticalAlignBottom
+import androidx.compose.material.icons.outlined.WarningAmber
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -54,6 +56,7 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.listSaver
@@ -74,6 +77,7 @@ import androidx.compose.ui.tooling.preview.PreviewLightDark
 import androidx.compose.ui.unit.dp
 import androidx.core.content.FileProvider
 import java.io.File
+import java.io.OutputStream
 import kotlin.time.Duration.Companion.milliseconds
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
@@ -87,11 +91,25 @@ private val FullLevelNamesMinWidth = 600.dp
 private const val LOG_LIST_PANE_WEIGHT = 0.56f
 private const val LOG_DETAILS_PANE_WEIGHT = 0.44f
 
-/** Host-themed, navigation-agnostic log viewer. Pass one source per installation. */
+/**
+ * Host-themed, navigation-agnostic log viewer. Pass one source per installation. [processExits]
+ * fills the Status tab's exit section; a library capture brings its own, and an app-provided source
+ * can pass one built with [ProcessExitHistory.Builder].
+ */
 @OptIn(ExperimentalMaterial3Api::class, FlowPreview::class)
 @Composable
-public fun LogViewer(source: LogSource, onBack: () -> Unit, modifier: Modifier = Modifier) {
+public fun LogViewer(
+  source: LogSource,
+  onBack: () -> Unit,
+  modifier: Modifier = Modifier,
+  processExits: ProcessExitHistory? = (source as? TimberLogCapture)?.processExits,
+) {
   val capabilities by source.capabilities.collectAsState()
+  val exitState by
+    produceState<ProcessExitState?>(null, processExits) {
+      processExits?.state?.collect { value = it }
+    }
+  val pendingExits = exitState?.pendingExits.orEmpty()
   val liveUpdates = capabilities.hasLiveUpdates && source.changes != null
   val effectiveCapabilities = capabilities.copy(hasLiveUpdates = liveUpdates)
   val health by source.health.collectAsState()
@@ -114,6 +132,10 @@ public fun LogViewer(source: LogSource, onBack: () -> Unit, modifier: Modifier =
   var follow by rememberSaveable(source) { mutableStateOf(true) }
   var refresh by remember { mutableIntStateOf(0) }
   var error by remember { mutableStateOf<String?>(null) }
+  // A key rather than the exit, so the open sheet survives rotation without serializing it.
+  var selectedExitKey by rememberSaveable(processExits) { mutableStateOf<String?>(null) }
+  val selectedExit =
+    (exitState as? ProcessExitState.Loaded)?.exits?.firstOrNull { it.key == selectedExitKey }
   // Save selection identifiers rather than serializing log entries or traces.
   var selectedEntryKey by
     rememberSaveable(
@@ -230,16 +252,30 @@ public fun LogViewer(source: LogSource, onBack: () -> Unit, modifier: Modifier =
           },
           selectedTab = if (expanded) tab else null,
           onSelectTab = { tab = it },
+          pendingExits = pendingExits.size,
         )
       },
     ) { padding ->
       Column(Modifier.fillMaxSize().padding(padding)) {
-        if (!expanded) LogViewerTabs(selectedTab = tab, onSelectTab = { tab = it })
+        if (!expanded) {
+          LogViewerTabs(
+            selectedTab = tab,
+            onSelectTab = { tab = it },
+            pendingExits = pendingExits.size,
+          )
+        }
         error?.let {
           Text(it, color = MaterialTheme.colorScheme.error, modifier = Modifier.padding(12.dp))
         }
         if (tab == 1) {
-          StatusContent(effectiveCapabilities, health, Modifier.fillMaxSize())
+          StatusContent(
+            effectiveCapabilities,
+            health,
+            Modifier.fillMaxSize(),
+            exitState = exitState,
+            onDismissExits = { processExits?.let { scope.launch { it.acknowledge() } } },
+            onSelectExit = { selectedExitKey = it.key },
+          )
         } else {
           val onSelectSession: (LogSession) -> Unit = {
             if (selectedSession != it.id) {
@@ -332,6 +368,35 @@ public fun LogViewer(source: LogSource, onBack: () -> Unit, modifier: Modifier =
         }
       }
     }
+    if (tab == 1 && processExits != null) {
+      selectedExit?.let { exit ->
+        ExitDetailsSheet(
+          exit = exit,
+          sessionKept = sessions.any { it.id == exit.sessionId },
+          onOpenSession = {
+            selectedExitKey = null
+            selectedEntryKey = null
+            if (selectedSession != exit.sessionId) allEntries = emptyList()
+            selectedSession = exit.sessionId
+            follow = false
+            tab = 0
+          },
+          onShareTrace = {
+            scope.launch {
+              runCatching { shareExitTrace(context, processExits, exit) }
+                .onFailure { error = it.message ?: "Could not share the trace" }
+            }
+          },
+          onShareDetails = {
+            scope.launch {
+              runCatching { shareExitDetails(context, processExits, exit) }
+                .onFailure { error = it.message ?: "Could not share the details" }
+            }
+          },
+          onDismiss = { selectedExitKey = null },
+        )
+      }
+    }
     if (!expanded && tab == 0) {
       selectedEntry?.let { entry ->
         LogDetailsSheet(
@@ -401,6 +466,7 @@ private fun LogViewerTopBar(
   onClear: () -> Unit,
   selectedTab: Int? = null,
   onSelectTab: (Int) -> Unit = {},
+  pendingExits: Int = 0,
 ) {
   TopAppBar(
     title = {
@@ -411,6 +477,7 @@ private fun LogViewerTopBar(
             selectedTab,
             onSelectTab,
             Modifier.padding(start = 24.dp).width(240.dp),
+            pendingExits = pendingExits,
           )
         }
       }
@@ -459,6 +526,7 @@ private fun LogViewerTabs(
   selectedTab: Int,
   onSelectTab: (Int) -> Unit,
   modifier: Modifier = Modifier,
+  pendingExits: Int = 0,
 ) {
   PrimaryTabRow(selectedTabIndex = selectedTab, modifier = modifier) {
     Tab(
@@ -470,9 +538,28 @@ private fun LogViewerTabs(
     Tab(
       selected = selectedTab == 1,
       onClick = { onSelectTab(1) },
-      text = { Text("Status") },
+      text = {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+          if (pendingExits > 0) {
+            Icon(
+              Icons.Outlined.WarningAmber,
+              contentDescription = null,
+              tint = problemColor(),
+              modifier = Modifier.padding(end = 6.dp).size(18.dp).testTag("status_tab_warning"),
+            )
+          }
+          Text("Status")
+        }
+      },
       modifier =
-        Modifier.testTag("status_tab").semantics { contentDescription = "Show capture status" },
+        Modifier.testTag("status_tab").semantics {
+          contentDescription =
+            if (pendingExits > 0) {
+              "Show capture status, $pendingExits ${if (pendingExits == 1) "exit" else "exits"} to review"
+            } else {
+              "Show capture status"
+            }
+        },
     )
   }
 }
@@ -762,20 +849,93 @@ private fun NoMatchingEntriesPreview() {
 }
 
 internal fun shareLogs(context: Context, text: String) {
+  val file =
+    exportFile(context, "logs-${System.currentTimeMillis()}.txt") { it.write(text.toByteArray()) }
+  launchShare(context, file, "text/plain", "logs", "Share logs")
+}
+
+/**
+ * Writes an export into the FileProvider's cache folder, dropping exports older than a day. The
+ * same folder serves logs, exit traces and exit details.
+ */
+internal fun exportFile(context: Context, name: String, write: (OutputStream) -> Unit): File {
   val directory = File(context.cacheDir, "pnv-logviewer-exports")
   check(directory.isDirectory || directory.mkdirs()) { "Could not prepare export" }
   val cutoff = System.currentTimeMillis() - 24 * 60 * 60 * 1000L
   directory.listFiles()?.filter { it.lastModified() < cutoff }?.forEach(File::delete)
-  val file = File(directory, "logs-${System.currentTimeMillis()}.txt")
-  file.writeText(text)
+  return File(directory, name).apply { outputStream().use(write) }
+}
+
+internal fun launchShare(
+  context: Context,
+  file: File,
+  mimeType: String,
+  label: String,
+  chooserTitle: String,
+) {
   val uri =
     FileProvider.getUriForFile(context, "${context.packageName}.pnvlogviewer.fileprovider", file)
   val intent =
     Intent(Intent.ACTION_SEND).apply {
-      type = "text/plain"
+      type = mimeType
       putExtra(Intent.EXTRA_STREAM, uri)
       addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-      clipData = ClipData.newRawUri("logs", uri)
+      clipData = ClipData.newRawUri(label, uri)
     }
-  context.startActivity(Intent.createChooser(intent, "Share logs"))
+  context.startActivity(Intent.createChooser(intent, chooserTitle))
 }
+
+/** A tombstone is binary protobuf, so it goes out as a file to read on a computer. */
+internal suspend fun shareExitTrace(
+  context: Context,
+  history: ProcessExitHistory,
+  exit: ProcessExit,
+) {
+  val tombstone = exit.traceKind == TraceKind.Tombstone
+  val file =
+    withContext(Dispatchers.IO) {
+      val trace = checkNotNull(history.openTrace(exit)) { "Android no longer keeps this trace" }
+      trace.use { input ->
+        exportFile(
+          context,
+          exit.exportFileName(
+            if (tombstone) "tombstone" else "anr",
+            if (tombstone) "pb" else "txt",
+          ),
+        ) {
+          input.copyTo(it)
+        }
+      }
+    }
+  launchShare(
+    context,
+    file,
+    if (tombstone) "application/octet-stream" else "text/plain",
+    "trace",
+    "Share trace",
+  )
+}
+
+internal suspend fun shareExitDetails(
+  context: Context,
+  history: ProcessExitHistory,
+  exit: ProcessExit,
+) {
+  val file =
+    withContext(Dispatchers.IO) {
+      // An ANR dump is text and reads well after the fields; a tombstone stays a separate file.
+      val trace =
+        if (exit.traceKind == TraceKind.AnrDump) {
+          history.openTrace(exit)?.use { it.readBytes().decodeToString() }
+        } else {
+          null
+        }
+      exportFile(context, exit.exportFileName("exit", "txt")) {
+        it.write(exit.detailsText(trace).toByteArray())
+      }
+    }
+  launchShare(context, file, "text/plain", "exit", "Share exit details")
+}
+
+private val ProcessExit.key: String
+  get() = "$timestampMillis:$pid"

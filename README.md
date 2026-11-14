@@ -14,7 +14,7 @@ only to the debug variant:
 
 ```kotlin
 dependencies {
-    debugImplementation("io.github.pedronveloso:logviewer:0.10.0")
+    debugImplementation("io.github.pedronveloso:logviewer:0.11.0")
 }
 ```
 
@@ -57,13 +57,17 @@ Create one capture in the host `Application` and explicitly install it. Keep it 
 debug screen can access it, such as a dependency-injection singleton:
 
 ```kotlin
-val capture = TimberLogCapture(
-  context = this,
-  persistAcrossCrashes = true,
-  redact = StandardLogRedactor::redact,
-)
+val capture =
+  TimberLogCapture.Builder(this)
+    .persistAcrossCrashes(true)
+    .redact(StandardLogRedactor::redact)
+    .build()
 capture.install()
 ```
+
+Every builder option has a default, so `TimberLogCapture.Builder(this).build()` is a valid
+memory-only capture. The older `TimberLogCapture(context, ...)` constructor still works but is
+deprecated in favor of the builder.
 
 Then render it inside the app's theme and navigation:
 
@@ -94,6 +98,84 @@ the affected field is replaced with `<redaction failed>`. Share uses captured en
 sharing is a user action through an app-private temporary file and a non-exported `FileProvider`.
 The viewer also remembers one UI preference, whether long lines wrap in the entry details, in a
 private `SharedPreferences` file named `pnv_logviewer`; it never stores log content there.
+
+## Process exits
+
+From Android 11 (API 30), the Status tab also lists the exits Android recorded for the app
+(`ApplicationExitInfo`): when and why each process ended, what that reason means, where the app was
+(on screen, a foreground service, the background), Android's own description and the memory it
+sampled. A process can't see its own death, so these are earlier sessions; read them next to the
+persisted logs of the session that died. On older versions the section says it's unavailable.
+
+Some exits are flagged: by default memory-limit kills, crashes, native crashes and ANRs. While one
+is pending, the Status tab title shows a warning icon, and the exit gets a card with a Dismiss
+button. Dismissing stores the newest reviewed exit's timestamp in the same `pnv_logviewer`
+preferences, so it stays reviewed after a restart.
+
+Tracking is on by default. It only queries the system, so it plants no tree and collects nothing.
+Descriptions go through the capture's `redact` callback. Configure or turn it off on the builder:
+
+```kotlin
+TimberLogCapture.Builder(this)
+  .processExits { alertOn(setOf(ExitReason.MemoryLimit)).maxExits(32) }
+  .build()
+
+TimberLogCapture.Builder(this).processExits(enabled = false).build()
+```
+
+`capture.processExits` exposes the history to the host app: `state` is a
+`StateFlow<ProcessExitState>`, so the app's own UI can react, for example with a badge on its
+debug menu entry, and `acknowledge()` marks everything pending as reviewed:
+
+```kotlin
+val exits = capture.processExits ?: return
+val state by exits.state.collectAsStateWithLifecycle()
+BadgedBox(badge = { if (state.pendingExits.isNotEmpty()) Badge() }) {
+  Icon(Icons.Outlined.BugReport, contentDescription = "Logs")
+}
+```
+
+Tap an exit for its details sheet:
+- Android's description and the exit status (an exit code, or the signal, such as `Signal 9 (SIGKILL)`).
+- The memory sampled at exit, and the process name and PID.
+- For ANRs on Android 17 and later, the ANR type, the timeout that was hit, and whether the user could see the hang.
+- The log session the process was running, with a button to open its logs while the viewer still keeps them, and the app's note.
+
+Data that is better read on a computer is shared rather than shown:
+- **Share trace** appears when Android kept a trace. It sends an ANR's thread dump as `anr-<time>.txt`, or a native crash tombstone (Android 12+) as `tombstone-<time>.pb`. The tombstone is a protobuf following AOSP's [`tombstone.proto`](https://android.googlesource.com/platform/system/core/+/refs/heads/main/debuggerd/proto/tombstone.proto). Read it with AOSP's `pbtombstone`, or with `protoc --decode=Tombstone tombstone.proto < tombstone.pb`. Android keeps traces in a shared buffer, so an older one may already be gone.
+- **Share details** sends every field as `exit-<time>.txt`, with an ANR dump appended.
+
+Both use the same share chooser and app-private export folder as Share for logs.
+`processExits.openTrace(exit)` gives host apps the same trace stream.
+
+To link exits to log sessions, `install()` tags the process through
+`ActivityManager.setProcessStateSummary` with the capture's session ID. Add a short note with
+`capture.setExitNote("model: Voz")`; it is redacted and cut to fit Android's 128-byte limit. Android
+throttles these writes, so set the note when the state changes, and keep personal data out of it.
+Android keeps one summary per process, so an app that writes its own turns the link off with
+`.linkExitsToSessions(false)`; its bytes then show in the sheet as they are.
+
+Call `refresh()` to read the history again. An app that brings its own `LogSource` builds a
+history with `ProcessExitHistory.Builder(context)` and passes it to
+`LogViewer(source, onBack, processExits = history)`.
+
+Android 17's memory limiter is documented as `REASON_OTHER` with a description starting
+`MemoryLimiter:`, but Android 17 builds record reason 17 ("SYSTEM MEMORY LIMIT EXCEEDED", described
+as `[KILL PID] kill`), which the public SDK doesn't define. Both count as `ExitReason.MemoryLimit`;
+reason 17 only from Android 17, since it means nothing documented on older releases.
+
+To produce one, check that the device runs the limiter with `adb shell am memory-limiter status`; it
+must report `enabled`. Some Android 17 builds ship without its config and report `disabled`, which a
+`user` build can't change; use an Android 17 AVD with a Google APIs image instead. Then cap the
+app's process and use it until Android stops it:
+
+```sh
+adb shell am memory-limiter manual -p $(adb shell pidof com.example.app) 300MB
+```
+
+Crossing the cap first only throttles the process; the kill comes once its anonymous memory plus
+swap goes well past it, so lower the cap if nothing happens. `adb shell logcat -s MemoryLimiter`
+shows the kill. The cap lasts for that process only.
 
 ## Use an existing store
 

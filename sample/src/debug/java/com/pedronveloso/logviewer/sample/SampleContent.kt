@@ -41,6 +41,8 @@ fun SampleContent(modifier: Modifier = Modifier) {
       source = remember(scenario) { scenario.source(SampleApplication.capture) },
       onBack = returnHome,
       modifier = modifier,
+      // Demo scenarios wrap the capture, so hand its exit history over explicitly.
+      processExits = SampleApplication.capture.processExits,
     )
   } else {
     SampleHome(
