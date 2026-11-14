@@ -33,6 +33,9 @@ class ProcessExitHistoryTest {
     importance: Int = 100,
   ) = RawExit(timestamp, timestamp.toInt(), reason, description, importance, 0, 0, "app")
 
+  // The tests run on API 35, where only the documented limiter form counts.
+  private fun limiterKill(timestamp: Long) = raw(timestamp, 13, LIMITER)
+
   // Unconfined runs the initial load before the constructor returns, so tests read state directly.
   private fun history(
     exits: List<RawExit>,
@@ -53,9 +56,13 @@ class ProcessExitHistoryTest {
   fun memoryLimiterMatchesTheDocumentedAndTheRecordedForm() {
     assertThat(classifyExit(13, "MemoryLimiter:AnonSwap")).isEqualTo(ExitReason.MemoryLimit)
     // What an Android 17 emulator recorded for a real limiter kill.
-    assertThat(classifyExit(17, "[KILL PID] kill")).isEqualTo(ExitReason.MemoryLimit)
+    assertThat(classifyExit(17, "[KILL PID] kill", sdkInt = 37)).isEqualTo(ExitReason.MemoryLimit)
+    // Reason 17 isn't public, so before Android 17 it means nothing we know of.
+    assertThat(classifyExit(17, "[KILL PID] kill", sdkInt = 36)).isEqualTo(ExitReason.Unknown)
     assertThat(classifyExit(13, null)).isEqualTo(ExitReason.Other)
     assertThat(classifyExit(13, "killed by user")).isEqualTo(ExitReason.Other)
+    assertThat(classifyExit(13, "after MemoryLimiter: in another process"))
+      .isEqualTo(ExitReason.Other)
     assertThat(classifyExit(4, null)).isEqualTo(ExitReason.Crash)
     assertThat(classifyExit(999, null)).isEqualTo(ExitReason.Unknown)
   }
@@ -63,7 +70,7 @@ class ProcessExitHistoryTest {
   @Test
   fun defaultAlertsFlagMemoryLimitCrashesAndAnrs() {
     val history =
-      history(listOf(raw(6, 17), raw(5, 10), raw(4, 4), raw(3, 6), raw(2, 3), raw(1, 5)))
+      history(listOf(limiterKill(6), raw(5, 10), raw(4, 4), raw(3, 6), raw(2, 3), raw(1, 5)))
     assertThat(history.loaded.exits).hasSize(6)
     assertThat(history.loaded.pending.map { it.reason })
       .containsExactly(
@@ -78,13 +85,14 @@ class ProcessExitHistoryTest {
 
   @Test
   fun alertOnReplacesTheDefaults() {
-    val history = history(listOf(raw(2, 17), raw(1, 4)), alertOn = setOf(ExitReason.MemoryLimit))
+    val history =
+      history(listOf(limiterKill(2), raw(1, 4)), alertOn = setOf(ExitReason.MemoryLimit))
     assertThat(history.loaded.pending.map { it.reason }).containsExactly(ExitReason.MemoryLimit)
   }
 
   @Test
   fun acknowledgeClearsPendingAndPersists() {
-    val exits = listOf(raw(2_000, 17), raw(1_000, 4))
+    val exits = listOf(limiterKill(2_000), raw(1_000, 4))
     val history = history(exits)
     runBlocking { history.acknowledge() }
     assertThat(history.loaded.pending).isEmpty()
@@ -160,3 +168,5 @@ class ProcessExitHistoryTest {
     assertThat(message.detail).isEqualTo("${ExitReason.MemoryLimit.explanation} It was on screen.")
   }
 }
+
+private const val LIMITER = "MemoryLimiter:AnonSwap"

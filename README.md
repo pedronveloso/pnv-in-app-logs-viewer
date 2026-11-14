@@ -159,9 +159,10 @@ Call `refresh()` to read the history again. An app that brings its own `LogSourc
 history with `ProcessExitHistory.Builder(context)` and passes it to
 `LogViewer(source, onBack, processExits = history)`.
 
-Android 17's memory limiter is documented as `REASON_OTHER` with `MemoryLimiter:AnonSwap` in the
-description, but Android 17 builds record reason 17 ("SYSTEM MEMORY LIMIT EXCEEDED", described as
-`[KILL PID] kill`), which the public SDK doesn't define. Both count as `ExitReason.MemoryLimit`.
+Android 17's memory limiter is documented as `REASON_OTHER` with a description starting
+`MemoryLimiter:`, but Android 17 builds record reason 17 ("SYSTEM MEMORY LIMIT EXCEEDED", described
+as `[KILL PID] kill`), which the public SDK doesn't define. Both count as `ExitReason.MemoryLimit`;
+reason 17 only from Android 17, since it means nothing documented on older releases.
 
 To produce one, check that the device runs the limiter with `adb shell am memory-limiter status`; it
 must report `enabled`. Some Android 17 builds ship without its config and report `disabled`, which a

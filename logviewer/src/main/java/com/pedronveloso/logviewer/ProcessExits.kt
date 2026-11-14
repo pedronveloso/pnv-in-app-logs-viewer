@@ -425,14 +425,19 @@ internal fun decodeStateSummary(bytes: ByteArray?): StateSummary {
 }
 
 /**
- * The memory limiter is documented as `REASON_OTHER` with "MemoryLimiter:AnonSwap" in the
- * description, but Android 17 builds record it as reason 17, which the public SDK doesn't define,
- * with a description of "[KILL PID] kill". Both count.
+ * The memory limiter is documented as `REASON_OTHER` with a description starting "MemoryLimiter:",
+ * but Android 17 builds record it as reason 17, which the public SDK doesn't define, with a
+ * description of "[KILL PID] kill". Both count. Reason 17 is only trusted on Android 17 and later,
+ * where it was observed; elsewhere it stays [ExitReason.Unknown].
  */
-internal fun classifyExit(reasonCode: Int, description: String?): ExitReason =
+internal fun classifyExit(
+  reasonCode: Int,
+  description: String?,
+  sdkInt: Int = Build.VERSION.SDK_INT,
+): ExitReason =
   if (
-    reasonCode == REASON_SYSTEM_MEMORY_LIMIT ||
-      (reasonCode == REASON_OTHER && description?.contains("MemoryLimiter:") == true)
+    (reasonCode == REASON_SYSTEM_MEMORY_LIMIT && sdkInt >= ANDROID_17) ||
+      (reasonCode == REASON_OTHER && description?.startsWith("MemoryLimiter:") == true)
   ) {
     ExitReason.MemoryLimit
   } else {

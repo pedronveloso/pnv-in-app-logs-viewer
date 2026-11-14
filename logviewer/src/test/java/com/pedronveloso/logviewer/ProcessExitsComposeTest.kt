@@ -53,7 +53,7 @@ class ProcessExitsComposeTest {
 
   @Test
   fun statusTabWarnsUntilTheExitIsDismissed() {
-    val history = history(RawExit(1_000, 42, 17, "[KILL PID] kill", 100, 0, 0, "app"))
+    val history = history(RawExit(1_000, 42, 13, "MemoryLimiter:AnonSwap", 100, 0, 0, "app"))
     compose.setContent {
       MaterialTheme { LogViewer(EmptySource, onBack = {}, processExits = history) }
     }
@@ -121,7 +121,9 @@ class ProcessExitsComposeTest {
   fun openSessionLogsJumpsToThatSession() {
     val tag = encodeStateSummary("old", null)
     openExitSheet(
-      history(RawExit(1_000, 3, 17, "[KILL PID] kill", 100, 0, 0, "app", stateSummary = tag)),
+      history(
+        RawExit(1_000, 3, 13, "MemoryLimiter:AnonSwap", 100, 0, 0, "app", stateSummary = tag),
+      ),
       pid = 3,
     )
     // The sheet is taller than the test screen; tapping off-screen would land on the scrim.
